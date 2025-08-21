@@ -1,0 +1,43 @@
+--- original/gmx-completion.bash	2025-05-12 16:19:00.000000000 +0100
++++ changed/gmx-completion.bash	2025-06-17 18:55:50.869553887 +0100
+@@ -816,6 +816,23 @@
+ -or) COMPREPLY=( $(compgen -S ' ' -X '!*.out?(.gz|.Z)' -f -- $c ; compgen -S '/' -d $c));;
+ -Spect) COMPREPLY=( $(compgen -S ' ' -X '!*.out?(.gz|.Z)' -f -- $c ; compgen -S '/' -d $c));;
+ esac }
++# BEGIN CHANGE======================================================================================================
++_gmx_hydorder2_compl() {
++local IFS=$'\n'
++local c=${COMP_WORDS[COMP_CWORD]}
++local n
++for ((n=1;n<COMP_CWORD;++n)) ; do [[ "${COMP_WORDS[COMP_CWORD-n]}" == -* ]] && break ; done
++local p=${COMP_WORDS[COMP_CWORD-n]}
++COMPREPLY=()
++if (( $COMP_CWORD <= 1 )) || [[ $c == -* ]]; then COMPREPLY=( $(compgen -S ' '  -W $'-b\n-e\n-dt\n-f\n-n\n-s\n-o\n-tblock\n-q4bins\n-q4form\n-rlo\n-rhi' -- $c)); return 0; fi
++case "$p" in
++-f) (( $n <= 1 )) && COMPREPLY=( $(compgen -S ' ' -X '!*@(.xtc|.trr|.cpt|.gro|.g96|.pdb|.tng)?(.gz|.Z)' -f -- $c ; compgen -S '/' -d $c));;
++-n) (( $n <= 1 )) && COMPREPLY=( $(compgen -S ' ' -X '!*.ndx?(.gz|.Z)' -f -- $c ; compgen -S '/' -d $c));;
++-s) (( $n <= 1 )) && COMPREPLY=( $(compgen -S ' ' -X '!*.tpr?(.gz|.Z)' -f -- $c ; compgen -S '/' -d $c));;
++-or) COMPREPLY=( $(compgen -S ' ' -X '!*.out?(.gz|.Z)' -f -- $c ; compgen -S '/' -d $c));;
++esac
++}
++# END CHANGE======================================================================================================
+ _gmx_insert_molecules_compl() {
+ local IFS=$'\n'
+ local c=${COMP_WORDS[COMP_CWORD]}
+@@ -1777,7 +1794,7 @@
+ done
+ if (( i == COMP_CWORD )); then
+ c=${COMP_WORDS[COMP_CWORD]}
+-COMPREPLY=( $(compgen -S ' ' -W $'-h\n-quiet\n-version\n-copyright\n-nice\n-nobackup\nanaeig\nanalyze\nangle\nawh\nbar\nbundle\ncheck\nchi\ncluster\nclustsize\nconfrms\nconvert-tpr\nconvert-trj\ncovar\ncurrent\ndensity\ndensmap\ndensorder\ndielectric\ndipoles\ndisre\ndistance\ndos\ndssp\ndump\ndyecoupl\neditconf\neneconv\nenemat\nenergy\nextract-cluster\nfilter\nfreevolume\ngangle\ngenconf\ngenion\ngenrestr\ngrompp\ngyrate\ngyrate-legacy\nh2order\nhbond\nhbond-legacy\nhelix\nhelixorient\nhelp\nhydorder\ninsert-molecules\nlie\nmake_edi\nmake_ndx\nmdmat\nmdrun\nmindist\nmk_angndx\nmsd\nnmeig\nnmens\nnmr\nnmtraj\nnonbonded-benchmark\norder\npairdist\npdb2gmx\npme_error\npolystat\npotential\nprincipal\nrama\nrdf\nreport-methods\nrms\nrmsdist\nrmsf\nrotacf\nrotmat\nsaltbr\nsans-legacy\nsasa\nsaxs-legacy\nscattering\nselect\nsham\nsigeps\nsolvate\nsorient\nspatial\nspol\ntcaf\ntraj\ntrajectory\ntrjcat\ntrjconv\ntrjorder\ntune_pme\nvanhove\nvelacc\nwham\nwheel\nx2top\nxpm2ps' -- $c) )
++COMPREPLY=( $(compgen -S ' ' -W $'-h\n-quiet\n-version\n-copyright\n-nice\n-nobackup\nanaeig\nanalyze\nangle\nawh\nbar\nbundle\ncheck\nchi\ncluster\nclustsize\nconfrms\nconvert-tpr\nconvert-trj\ncovar\ncurrent\ndensity\ndensmap\ndensorder\ndielectric\ndipoles\ndisre\ndistance\ndos\ndssp\ndump\ndyecoupl\neditconf\neneconv\nenemat\nenergy\nextract-cluster\nfilter\nfreevolume\ngangle\ngenconf\ngenion\ngenrestr\ngrompp\ngyrate\ngyrate-legacy\nh2order\nhbond\nhbond-legacy\nhelix\nhelixorient\nhelp\nhydorder\nhydorder2\ninsert-molecules\nlie\nmake_edi\nmake_ndx\nmdmat\nmdrun\nmindist\nmk_angndx\nmsd\nnmeig\nnmens\nnmr\nnmtraj\nnonbonded-benchmark\norder\npairdist\npdb2gmx\npme_error\npolystat\npotential\nprincipal\nrama\nrdf\nreport-methods\nrms\nrmsdist\nrmsf\nrotacf\nrotmat\nsaltbr\nsans-legacy\nsasa\nsaxs-legacy\nscattering\nselect\nsham\nsigeps\nsolvate\nsorient\nspatial\nspol\ntcaf\ntraj\ntrajectory\ntrjcat\ntrjconv\ntrjorder\ntune_pme\nvanhove\nvelacc\nwham\nwheel\nx2top\nxpm2ps' -- $c) )
+ return 0
+ fi
+ m=${COMP_WORDS[i]}
+@@ -1831,6 +1848,7 @@
+ helixorient) _gmx_helixorient_compl ;;
+ help) _gmx_help_compl ;;
+ hydorder) _gmx_hydorder_compl ;;
++hydorder2) _gmx_hydorder2_compl ;; # CHANGE
+ insert-molecules) _gmx_insert_molecules_compl ;;
+ lie) _gmx_lie_compl ;;
+ make_edi) _gmx_make_edi_compl ;;

@@ -1,0 +1,23 @@
+--- original/legacymodules.cpp	2025-05-12 16:18:11.000000000 +0100
++++ changed/legacymodules.cpp	2025-06-16 15:22:30.547544884 +0100
+@@ -304,6 +304,12 @@
+                    &gmx_hydorder,
+                    "hydorder",
+                    "Compute tetrahedrality parameters around a given atom");
++    // BEGIN CHANGE
++    registerModule(manager,
++                   &gmx_hydorder2,
++                   "hydorder2",
++                   "Compute hystogram of orientational tetrahedral order parameter around a given atom, possibly within defined shell");
++    // END CHANGE
+     registerModule(manager, &gmx_lie, "lie", "Estimate free energy from linear combinations");
+     registerModule(manager, &gmx_mdmat, "mdmat", "Calculate residue contact maps");
+     registerModule(
+@@ -533,6 +539,7 @@
+         group.addModule("densorder");
+         group.addModule("h2order");
+         group.addModule("hydorder");
++        group.addModule("hydorder2"); // Change
+         group.addModule("order");
+         group.addModule("potential");
+     }

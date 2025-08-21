@@ -1,0 +1,11 @@
+--- original/gmx_ana.h	2025-06-16 15:19:13.697988424 +0100
++++ changed/gmx_ana.h	2025-06-16 14:47:15.146179975 +0100
+@@ -93,6 +93,8 @@
+ 
+ int gmx_hydorder(int argc, char* argv[]);
+ 
++int gmx_hydorder2(int argc, char* argv[]);
++
+ int gmx_make_edi(int argc, char* argv[]);
+ 
+ int gmx_mindist(int argc, char* argv[]);
