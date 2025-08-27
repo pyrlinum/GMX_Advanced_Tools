@@ -48,6 +48,8 @@
 enum class PbcType : int;
 struct gmx_output_env_t;
 
+#define Q4DEF -1000.0
+
 //-----------------------------------------------------------------------------------------------------------------------------
 // Utlity inline functions:
 // Alternative definitions of Orientational Tetrahedral Order Parameter:
@@ -59,12 +61,23 @@ inline real gmx_hyd2_oto_func(real x,int q4form) { return (q4form==0)  ? 3./32.*
 //============================================================================================================================
 // Define groups and indices:
 static void rd_groups_by_index(gmx::ArrayRef<const IndexGroup> indexGroups, int ngrps, int grpIdx[], char* gnames[], int isize[], int* index[]);
-// Calculate OTO parameter in a frame:
-static void calc_tetra_order_hist(t_topology top, PbcType pbcType, int natoms, matrix box, rvec x[], int ng, int* isize, int** index, int sflag, real rlo, real rhi, int q4form, int hist_bins, real hist_bin_width, int* sg_hist);
+// Calculate OTO parameter per atom and save to qarr (if out of shell - -1)
+static void calc_tetra_order_vals(t_topology top, PbcType  pbcType, int  natoms, matrix box,rvec x[],int ng,int* isize,int** index,int sflag,real rlo,real rhi,int q4form,real* qarr);
+
+// Wrappers:
+// Calculate and print out OTO values over trajectory:
+static void calc_tetra_order_values(const char* fnTPS,const char* fnTRX,int ng,int* isize,int** index,int tblock,int* nframes,int sflag,real rlo,real rhi,int q4form,gmx_output_env_t* oenv);
 // Accumulate OTO hystogram over trajectory:
-static void calc_tetra_order_histogram(const char* fnTPS, const char* fnTRX, int ng, int* isize, int** index, int tblock, int* nframes, int sflag, real rlo, real rhi, int q4form, int hist_bins, int* sg_hist, real* sg_bin_centers, gmx_output_env_t* oenv);
+static void calc_tetra_order_histogram(const char* fnTPS, const char* fnTRX,int ng,int* isize,int** index,int tblock,int* nframes,int sflag,real rlo,real rhi,int q4form,int hist_bins,int* sg_hist,real* sg_bin_centers, gmx_output_env_t* oenv);
+
+// Helper functions:
+// calculate 1D histrogram:
+static void calc_hist( int maxidx, real* qarr, int hist_bins,real hist_bin_width, int* sg_hist);
+// Output of OTO values per frame:
+static void write_q4vals(int frame, int natm_write, int*  index, real* qarr);
 // Output of hystogram:
 static void writehist(int nframes,real* sg_bin_centers, int* sg_hist, int hist_bins, gmx::ArrayRef<const std::string> fnms);
+
 //==========================================================================================================================
 // Main program:
 //==========================================================================================================================
@@ -72,7 +85,7 @@ int gmx_hydorder2(int argc, char* argv[])
 {
     static const char* desc[] = {
         "[THISMODULE] is a fork of GROMACS HYDORDER module to compute the ",
-        "tetrahedrality order parameter around a given atom.",
+        "tetrahedrality order parameter around a given atom type (defalut: O_WAT).",
         "Unlike the original, this module computs a histogram of the parameter",
         "time-averaged over selected tpart of the trajectory",
         "In this version only angle order parameter is calculated.",
@@ -84,7 +97,10 @@ int gmx_hydorder2(int argc, char* argv[])
     static const real EPS = 1.0e-6;
     static int   nsttblock = 1;
     static int   i, frames = 0;
-    static int   q4bins = 0;
+    static int   q4bins = 0; 
+    /* default: 0 - do not compute OTO parameter
+    if 1 - compute individual OTO values per atom for each frame in separate file
+    if >1 - compute a sigle histogram */
     static int   q4form = 1;
     /*   0 - Chau & Hardwick 1998 - Gromacs default: tatrahedral water q4=0, random bonds q4=0.25
     1 - Errington & Debenedetti 2001 - average value of q varies from 0 for an ideal gas to 1 for a regular tetrahedron */
@@ -93,7 +109,11 @@ int gmx_hydorder2(int argc, char* argv[])
     static const char* water_gname = "O_&_WAT";
     static const char* solute_gname = "Protein";
     static const char* ancor_gname = "O*_N*_&_Protein";
-    const char* grpDescr[] = {water_gname, solute_gname, ancor_gname};
+    static const char* exclude_gname = "Exclude";
+    const char* grpDescr[] = {water_gname, solute_gname, ancor_gname, exclude_gname};
+
+    // default output file names:
+    static const char* ofile_hist = "oto_histogram.txt";
 
     // Cut-off radii used to split target atoms (water oxygens) by proximity to another group (protein)
     static real rcut_lower = -1.0;    // lower bound (<0.0 - no cutoff)
@@ -105,8 +125,8 @@ int gmx_hydorder2(int argc, char* argv[])
     real *q4bin_centers = nullptr;
 
     // Groups to study: 1 - water, 2 - hydration shell 3 - additional atoms from solute to use as vertices in OTO calculation
-    int grpNum = 3;
-    int grpIdx[] = {-1,-1,-1};
+    int grpNum = 4;
+    int grpIdx[] = {-1,-1,-1,-1};
     char** grpname = nullptr;
     int**  index   = nullptr;
     int*   isize   = nullptr;
@@ -141,6 +161,7 @@ int gmx_hydorder2(int argc, char* argv[])
         return 0;
     }
 
+    // inputs:
     ndxfnm = ftp2fn(efNDX, NFILE, fnm);
     tpsfnm = ftp2fn(efTPR, NFILE, fnm);
     trxfnm = ftp2fn(efTRX, NFILE, fnm);
@@ -148,7 +169,7 @@ int gmx_hydorder2(int argc, char* argv[])
 
     // Output file:
     gmx::ArrayRef<const std::string> raw = opt2fns("-or", NFILE, fnm);
-    if (raw.size() != 1)
+    if ( (q4bins > 1 ) && (raw.size() != 1))
     {
         gmx_fatal(FARGS, "No or not correct number (1) of output-files: %td \n", raw.ssize());
     }
@@ -180,7 +201,7 @@ int gmx_hydorder2(int argc, char* argv[])
     std::vector<IndexGroup> ndxGrps = init_index(ndxfnm);
     fprintf(stdout,"===========================================================\n");
     fprintf(stdout,"Analysing Index file for predefined group names:\n");
-    for(int ig=0;ig<3;ig++) {
+    for(int ig=0;ig<grpNum;ig++) {
         grpIdx[ig] = find_group(grpDescr[ig],ndxGrps);
         if (grpIdx[ig]>=0) {
             printf("Group %s found as group index %d\n",grpDescr[ig],grpIdx[ig]);
@@ -212,30 +233,40 @@ int gmx_hydorder2(int argc, char* argv[])
         fprintf(stdout,"Group %s was detected - using additional atoms as vertices for OTO calculation\n",ancor_gname );
     }
 
-    fprintf(stdout,"===========================================================\n");
-    fprintf(stdout,"Setup Finished - Starting calculation:\n");
-
-    /* Calculate q4 histogram and print it out as raw output:*/
-    // add first and last bins to collect out of [0:1] bounds values
-    hist_nbins = q4bins+2;
-    snew(q4hist_values,hist_nbins);
-    snew(q4bin_centers,hist_nbins);
-
-    //calc_tetra_order_histogram(ndxfnm, tpsfnm, trxfnm, nsttblock, &frames, q4form, hist_nbins, q4hist_values, q4bin_centers, oenv);
-    calc_tetra_order_histogram(tpsfnm, trxfnm, grpNum, isize, index, nsttblock, &frames, shell_flag, rcut_lower, rcut_upper, q4form, hist_nbins, q4hist_values, q4bin_centers, oenv);
-
-    fprintf(stdout,"Calculation Finished - writing output\n");
-    fprintf(stdout,"===========================================================\n");
-
-    writehist(frames,q4bin_centers, q4hist_values, hist_nbins, raw);
-
-    // Free allocated memory:
-    sfree(q4hist_values);
-    sfree(q4bin_centers);
-    for(int g=0;g<grpNum;g++) {
-        if (isize[g]>0) { sfree(index[g]); }
-        sfree(grpname[g]);
+    if ( isize[3]>0 ) {
+        fprintf(stdout,"Group %s was detected - excluding from OTO calculation on each step those water molecules, which have at least one of nearest neighbours from this group\n",exclude_gname );
     }
+
+   
+    if ( q4bins > 1 ) {
+        /* Calculate q4 histogram and print it out as raw output:*/
+        // add first and last bins to collect out of [0:1] bounds values
+        fprintf(stdout,"Calculating distribution of OTO values per each of the selected atoms\n");
+
+        hist_nbins = q4bins+2;
+        snew(q4hist_values,hist_nbins);
+        snew(q4bin_centers,hist_nbins);
+        
+        // calculating global OTO distribution:
+        calc_tetra_order_histogram(tpsfnm, trxfnm, grpNum, isize, index, nsttblock, &frames, shell_flag, rcut_lower, rcut_upper, q4form, hist_nbins, q4hist_values, q4bin_centers, oenv);
+
+        writehist(frames,q4bin_centers, q4hist_values, hist_nbins, raw);
+
+        // Free allocated memory:
+        sfree(q4hist_values);
+        sfree(q4bin_centers);
+        for(int g=0;g<grpNum;g++) {
+            if (isize[g]>0) { sfree(index[g]); }
+            sfree(grpname[g]);
+        }
+
+    } else if ( q4bins == 1 ) {
+        /* Calculate individual q4 values and print it out as raw output:*/
+        fprintf(stdout,"Calculating individual OTO values per each of the selected atoms\n");
+        calc_tetra_order_values(tpsfnm, trxfnm, grpNum, isize, index, nsttblock, &frames, shell_flag, rcut_lower, rcut_upper, q4form, oenv);           
+    } 
+
+
     sfree(isize);
     sfree(index);
     sfree(grpname);
@@ -246,33 +277,9 @@ int gmx_hydorder2(int argc, char* argv[])
 //=============================================================================================================================
 // Auxhiliary functions:
 //=============================================================================================================================
-// Define groups and indices - forked from index.cpp: rd_groups, but uses predefined group indices  instead of querrying each group:
-static void rd_groups_by_index(gmx::ArrayRef<const IndexGroup> indexGroups,
-                               int                             ngrps,
-                               int                             grpIdx[],
-                               char*                           gnames[],
-                               int                             isize[],
-                               int*                            index[])
-{
-
-    for(int i=0; i<ngrps; i++) {
-        if (grpIdx[i]>=0) {
-            int gnr1 = grpIdx[i];
-            gnames[i] = gmx_strdup(indexGroups[gnr1].name.c_str());
-            isize[i]  = gmx::ssize(indexGroups[gnr1].particleIndices);
-            snew(index[i], isize[i]);
-            for (int j = 0; (j < isize[i]); j++)
-            {
-                index[i][j] = indexGroups[gnr1].particleIndices[j];
-            }
-        } else {
-            isize[i] = 0; // predefined group was not found set size to 0 as a flag
-        }
-    }
-}
 //-----------------------------------------------------------------------------------------------------------------------------
-// Calculate OTO parameter in a frame:
-static void calc_tetra_order_hist(t_topology top,
+// Main compute - calculate OTO in a frame and save to array qarr:
+static void calc_tetra_order_vals(t_topology top,
                                   PbcType    pbcType,
                                   int        natoms,
                                   matrix     box,
@@ -284,13 +291,11 @@ static void calc_tetra_order_hist(t_topology top,
                                   real       rlo,
                                   real       rhi,
                                   int        q4form,
-                                  int        hist_bins,
-                                  real       hist_bin_width,
-                                  int*       sg_hist)
+                                  real*      qarr)
 {
     const int   maxidx = isize[0]; // number of water oxygens in total system
-    const int   nei_grp[2] = { 0, 2 }; // predefined groups to scan for nierest neighbours of a central atom
-    int         ix, jx, i, j, k, gndx, ns, *nn[4], *nng[4];
+    const int   nei_grp[2] = { 0, 2 }; // predefined groups to scan for nearest neighbours
+    int         ix, jx, i, j, k, gndx, ns, nxcl, *nn[4], *nng[4];
     int         slindex_h;
     bool        *smask, in_shell_flag;
     rvec        dx, rj, rk, urk, urj;
@@ -364,16 +369,7 @@ static void calc_tetra_order_hist(t_topology top,
         (void)memset(smask, true, maxidx);
     }
 
-    //TODO: Remove -  Debug - Check detected molecules:
-    ns = 0;
-    for(i=0;i<maxidx;i++)
-        if (smask[i])   ns++;
-    if (sflag) {
-        fprintf(stdout,"Found %d water oxygens in shell (%.3f,%.3f)\n",ns,sqrt(rl2),sqrt(rh2));
-    } else {
-        fprintf(stdout,"Found %d water oxygens\n",ns);
-    }
-
+    nxcl=0;
     // Main OTO Calculation:
     for (i = 0; (i < maxidx); i++)
         if (smask[i]) { // loop over oxygens inside shell (or all O group if no shell required):
@@ -447,35 +443,55 @@ static void calc_tetra_order_hist(t_topology top,
                 }
             }
 
-            // Step 2. Calculate angular part tetrahedrality order parameter per atom
-            sgmol[i] = 0.0;
-            for (j = 0; (j < 3); j++)
+            // Step 1B. if excluded group is present - check if one of the nearest neighbours is from this group:
+            gndx=3;
+            j=0;
+            in_shell_flag = smask[i];
+            while ((j < isize[gndx]) && (in_shell_flag))
             {
-                for (k = j + 1; (k < 4); k++)
-                {
-                    pbc_dx(&pbc, x[ix], x[index[nng[k][i]][nn[k][i]]], rk); // take in account the group of neighbour atom
-                    pbc_dx(&pbc, x[ix], x[index[nng[j][i]][nn[j][i]]], rj); // take in account the group of neighbour atom
+                if (in_shell_flag) {
+                    jx = index[gndx][j];
 
-                    unitv(rk, urk);
-                    unitv(rj, urj);
+                    pbc_dx(&pbc, x[ix], x[jx], dx);
+                    r2 = iprod(dx, dx);
 
-                    cost  = iprod(urk, urj) + onethird;
-                    cost2 = cost * cost;
-
-                    sgmol[i] += cost2;
+                    // determine if excluded atom is closer than other nearest neighbours
+                    if (r2 < r_nn[3][i]+0.000001)
+                    {
+                        in_shell_flag=false;
+                        smask[i] = false;
+                        nxcl++;
+                    }
                 }
+                j++;
             }
-            sgmol[i] = gmx_hyd2_oto_func(sgmol[i],q4form);
 
-            // Compute histogram
-            if (sgmol[i] < 0.0) {
-                slindex_h = 0;
-            } else if (sgmol[i] > 1.0) {
-                slindex_h = hist_bins-1;
-            } else {
-                slindex_h = static_cast<int>(std::floor(sgmol[i] / hist_bin_width))+1;
+            if (smask[i])  {
+                // Step 2. Calculate angular part tetrahedrality order parameter per atom
+                sgmol[i] = 0.0;
+                for (j = 0; (j < 3); j++)
+                {
+                    for (k = j + 1; (k < 4); k++)
+                    {
+                        pbc_dx(&pbc, x[ix], x[index[nng[k][i]][nn[k][i]]], rk); // take in account the group of neighbour atom
+                        pbc_dx(&pbc, x[ix], x[index[nng[j][i]][nn[j][i]]], rj); // take in account the group of neighbour atom
+
+                        unitv(rk, urk);
+                        unitv(rj, urj);
+
+                        cost  = iprod(urk, urj) + onethird;
+                        cost2 = cost * cost;
+
+                        sgmol[i] += cost2;
+                    }
+                }
+                sgmol[i] = gmx_hyd2_oto_func(sgmol[i],q4form);
             }
-            sg_hist[slindex_h]++ ;
+
+            // Save tuples of neqighbours and q4 values to output arrays:
+            if (smask[i])  {
+                qarr[i] = sgmol[i];
+            }
         } // end if (smask[i])
 
     sfree(smask);
@@ -488,6 +504,74 @@ static void calc_tetra_order_hist(t_topology top,
     }
 }
 //-----------------------------------------------------------------------------------------------------------------------------
+// Wrappers:
+// Calculate and print out OTO values over trajectory:
+static void calc_tetra_order_values(const char*       fnTPS,
+                                       const char*       fnTRX,
+                                       int               ng,
+                                       int*              isize,
+                                       int**             index,
+                                       int               tblock,
+                                       int*              nframes,
+                                       int               sflag,
+                                       real              rlo,
+                                       real              rhi,
+                                       int               q4form,
+                                       gmx_output_env_t* oenv)
+{
+    t_topology   top;
+    PbcType      pbcType;
+    t_trxstatus* status;
+    int          natoms;
+    real         t,binw;
+    rvec *       xtop, *x;
+    matrix       box;
+    real*        qarr = nullptr; 
+    int          i, framenr;
+    const real onehalf = 1.0 / 2.0;
+
+
+    // Check topology and trajectory files for consistency with index file:
+    read_tps_conf(fnTPS, &top, &pbcType, &xtop, nullptr, box, FALSE);
+    // check if atom numbers in Topology and Trajectory files match:
+    natoms = read_first_x(oenv, &status, fnTRX, &t, &x, box);
+    if (natoms > top.atoms.nr) { gmx_fatal(FARGS, "Topology (%d atoms) does not match trajectory (%d atoms)", top.atoms.nr, natoms); }
+    // check if all atoms in selected index groups matching trajectory atoms:
+    for(int ig=0; ig<ng; ig++) { if (isize[ig]>0) { check_index(nullptr, isize[ig], index[ig], nullptr, natoms); }}
+
+    snew(qarr,isize[0]);
+    for(int iq=0;iq<isize[0];iq++) qarr[iq]=Q4DEF;
+    *nframes = 0;
+    framenr  = 0;
+
+    /* Loop over frames*/
+    //TODO: add time average - accumulate x[] from NT read_next_x() and pass x_avg and box_avg to calc_tetra_order_hist()
+    fprintf(stdout, "Processing frames:\n");
+    do
+    {
+        // sample histogram every tblock steps (use the first frame without averaging for consistency)
+        // Can calculate running average of the atom coordinates here before main calculator
+        if (framenr % tblock == 0)
+        {
+            
+            for(int iq=0;iq<isize[0];iq++) qarr[iq]=Q4DEF;
+            
+            calc_tetra_order_vals(top, pbcType, natoms, box, x, ng, isize, index, sflag, rlo, rhi, q4form, qarr);
+            // save to output file:
+            write_q4vals(framenr, isize[0], index[0], qarr);
+
+            // update collected frame count:
+            (*nframes)++;
+
+        }
+        // update total frame count:
+        framenr++;
+
+    } while (read_next_x(oenv, status, &t, x, box));
+    close_trx(status);
+    sfree(qarr);
+}
+
 // Accumulate OTO hystogram over trajectory:
 static void calc_tetra_order_histogram(const char*       fnTPS,
                                        const char*       fnTRX,
@@ -513,6 +597,7 @@ static void calc_tetra_order_histogram(const char*       fnTPS,
     rvec *       xtop, *x;
     matrix       box;
     int*         sg_hist_tblk = nullptr;
+    real*        qarr = nullptr; 
     int          i, framenr;
     const real onehalf = 1.0 / 2.0;
 
@@ -525,6 +610,8 @@ static void calc_tetra_order_histogram(const char*       fnTPS,
     // check if all atoms in selected index groups matching trajectory atoms:
     for(int ig=0; ig<ng; ig++) { if (isize[ig]>0) { check_index(nullptr, isize[ig], index[ig], nullptr, natoms); }}
 
+    snew(qarr,isize[0]);
+    for(int iq=0;iq<isize[0];iq++) qarr[iq]=Q4DEF;
 
     // initiate histogram arrays:
     binw = 1.0/(hist_bins-2);
@@ -542,18 +629,18 @@ static void calc_tetra_order_histogram(const char*       fnTPS,
     fprintf(stdout, "Processing frames:\n");
     do
     {
-        // sample histogram every tblock steps
+        // sample histogram every tblock steps (use the first frame without averaging for consistency)
         // Can calculate running average of the atom coordinates here before main calculator
-        if ((framenr>0) && (framenr % tblock == 0))
+        if (framenr % tblock == 0)
         {
             // Initialize histogram temporary storage:
-            for (i = 0; i < hist_bins; i++)
-            {
-                sg_hist_tblk[i] = 0 ;
-            }
+            for(int iq=0;iq<isize[0];iq++) qarr[iq]=Q4DEF;
+            (void)memset(sg_hist_tblk,0,hist_bins*sizeof(int)) ;
 
-            // get q4 histogram on current frame:
-            calc_tetra_order_hist(top, pbcType, natoms, box, x, ng, isize, index, sflag, rlo, rhi, q4form, hist_bins, binw, sg_hist_tblk);
+            // get q4 histogram on current frame:      
+            calc_tetra_order_vals(top, pbcType, natoms, box, x, ng, isize, index, sflag, rlo, rhi, q4form, qarr);
+            calc_hist( isize[0], qarr, hist_bins, binw, sg_hist_tblk);
+
 
             for (i = 0; i < hist_bins; i++)
             {
@@ -562,6 +649,7 @@ static void calc_tetra_order_histogram(const char*       fnTPS,
 
             // update collected frame count:
             (*nframes)++;
+
         }
         // update total frame count:
         framenr++;
@@ -570,8 +658,75 @@ static void calc_tetra_order_histogram(const char*       fnTPS,
     close_trx(status);
 
     sfree(sg_hist_tblk);
+    sfree(qarr);
 }
 //-----------------------------------------------------------------------------------------------------------------------------
+// Define groups and indices - forked from index.cpp: rd_groups, but uses predefined group indices  instead of querrying each group:
+static void rd_groups_by_index(gmx::ArrayRef<const IndexGroup> indexGroups,
+                               int                             ngrps,
+                               int                             grpIdx[],
+                               char*                           gnames[],
+                               int                             isize[],
+                               int*                            index[])
+{
+
+    for(int i=0; i<ngrps; i++) {
+        if (grpIdx[i]>=0) {
+            int gnr1 = grpIdx[i];
+            gnames[i] = gmx_strdup(indexGroups[gnr1].name.c_str());
+            isize[i]  = gmx::ssize(indexGroups[gnr1].particleIndices);
+            snew(index[i], isize[i]);
+            for (int j = 0; (j < isize[i]); j++)
+            {
+                index[i][j] = indexGroups[gnr1].particleIndices[j];
+            }
+        } else {
+            isize[i] = 0; // predefined group was not found set size to 0 as a flag
+        }
+    }
+}
+
+// auxiliary to compute histogram - excluding the default -1.0 values:
+static void calc_hist(  int     maxidx,
+                        real*   qarr,
+                        int     hist_bins,
+                        real    hist_bin_width,
+                        int*    sg_hist)
+{
+    int slindex_h;
+    // Compute histogram
+    for (int i = 0; (i < maxidx); i++) {
+        if (qarr[i]>Q4DEF+0.1e-6) {
+            if (qarr[i] < 0.0) {
+                slindex_h = 0;
+            } else if (qarr[i] > 1.0) {
+                slindex_h = hist_bins-1;
+            } else {
+                slindex_h = static_cast<int>(std::floor(qarr[i] / hist_bin_width))+1;
+            }
+            sg_hist[slindex_h]++ ;
+        }
+    }
+}
+
+// Output of OTO values per frame:
+static void write_q4vals(int frame, int natm_write, int*  index, real* qarr)
+{
+    FILE *ofile;
+    char ofile_name[255];
+
+    sprintf(ofile_name, "q4vals.%06d.dat",frame );
+    fprintf(stdout, "Writing frame %06d data to %s\n",frame,ofile_name);
+
+    ofile = gmx_ffopen(ofile_name, "w");
+    for (int i = 0; i < natm_write; i++)
+    {
+        fprintf(ofile, "%d, %12.6f\n",index[i],qarr[i]);
+    }
+    gmx_ffclose(ofile);
+
+}
+
 // Output of hystogram:
 static void writehist(int nframes,real* sg_bin_centers, int* sg_hist, int hist_bins, gmx::ArrayRef<const std::string> fnms)
 {
